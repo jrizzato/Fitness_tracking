@@ -7,117 +7,14 @@ import numpy as np
 from threading import Thread
 from PIL import Image, ImageTk
 import sys
-import math
+from modules.position_estimator import PositionEstimator
+from modules.kalman_filter import KalmanFilter
 
 # Initialize MediaPipe Pose
 mp_pose = mp.solutions.pose
 mp_draw = mp.solutions.drawing_utils
 pose = mp_pose.Pose(static_image_mode=False, min_detection_confidence=0.5, min_tracking_confidence=0.5)
 
-# Position estimation class
-class PositionEstimator:
-    def __init__(self):
-        self.reference_shoulder_width = 40  # cm, average shoulder width
-        self.camera_height = 100  # cm, estimated camera height
-        self.prev_positions = []
-        self.max_history = 10
-        
-    def estimate_distance_from_camera(self, landmarks, frame_width, frame_height):
-        """Estimate distance from camera based on shoulder width"""
-        left_shoulder = landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER.value]
-        right_shoulder = landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER.value]
-        
-        # Calculate pixel distance between shoulders
-        shoulder_pixel_width = abs(left_shoulder.x - right_shoulder.x) * frame_width
-        
-        # Avoid division by zero
-        if shoulder_pixel_width == 0:
-            return None
-            
-        # Focal length estimation (this would need calibration for accuracy)
-        focal_length = frame_width * 0.8  # Rough estimation
-        
-        # Distance calculation using similar triangles
-        distance = (self.reference_shoulder_width * focal_length) / shoulder_pixel_width
-        return distance
-    
-    def estimate_3d_position(self, landmarks, frame_width, frame_height):
-        """Estimate 3D position relative to camera"""
-        distance = self.estimate_distance_from_camera(landmarks, frame_width, frame_height)
-        
-        if distance is None:
-            return None
-            
-        # Get center of mass (approximated by torso center)
-        left_shoulder = landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER.value]
-        right_shoulder = landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER.value]
-        left_hip = landmarks[mp_pose.PoseLandmark.LEFT_HIP.value]
-        right_hip = landmarks[mp_pose.PoseLandmark.RIGHT_HIP.value]
-        
-        center_x = (left_shoulder.x + right_shoulder.x + left_hip.x + right_hip.x) / 4
-        center_y = (left_shoulder.y + right_shoulder.y + left_hip.y + right_hip.y) / 4
-        
-        # Convert to world coordinates
-        world_x = (center_x - 0.5) * distance * 0.8  # Horizontal offset
-        world_y = (center_y - 0.5) * distance * 0.6  # Vertical offset
-        world_z = distance
-        
-        position = {
-            'x': world_x,
-            'y': world_y, 
-            'z': world_z,
-            'distance': distance
-        }
-        
-        # Smooth the position
-        self.prev_positions.append(position)
-        if len(self.prev_positions) > self.max_history:
-            self.prev_positions.pop(0)
-            
-        return self.smooth_position()
-    
-    def smooth_position(self):
-        """Apply smoothing to reduce noise"""
-        if not self.prev_positions:
-            return None
-            
-        avg_x = sum(p['x'] for p in self.prev_positions) / len(self.prev_positions)
-        avg_y = sum(p['y'] for p in self.prev_positions) / len(self.prev_positions)
-        avg_z = sum(p['z'] for p in self.prev_positions) / len(self.prev_positions)
-        avg_distance = sum(p['distance'] for p in self.prev_positions) / len(self.prev_positions)
-        
-        return {
-            'x': avg_x,
-            'y': avg_y,
-            'z': avg_z,
-            'distance': avg_distance
-        }
-    
-    def estimate_body_orientation(self, landmarks):
-        """Estimate body orientation (facing direction)"""
-        left_shoulder = landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER.value]
-        right_shoulder = landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER.value]
-        
-        # Calculate shoulder line angle
-        shoulder_angle = math.atan2(
-            right_shoulder.y - left_shoulder.y,
-            right_shoulder.x - left_shoulder.x
-        )
-        
-        # Convert to degrees
-        shoulder_angle_deg = math.degrees(shoulder_angle)
-        
-        # Determine facing direction
-        if abs(shoulder_angle_deg) < 30:
-            facing = "Front"
-        elif abs(shoulder_angle_deg) > 150:
-            facing = "Back"
-        elif shoulder_angle_deg > 0:
-            facing = "Right Side"
-        else:
-            facing = "Left Side"
-            
-        return facing, shoulder_angle_deg
 
 # Function to calculate the angle between three points
 def calculate_angle(a, b, c):
@@ -176,33 +73,6 @@ def calculate_horizontal_distance(a, b):
     """Calculate horizontal distance between two points."""
     return abs(a[0] - b[0])
 
-# Kalman Filter class for smoothing the distance
-class KalmanFilter:
-    def __init__(self):
-        self.state = np.zeros(2)  # Position and velocity
-        self.P = np.eye(2) * 1000  # Covariance matrix
-        self.F = np.array([[1, 1], [0, 1]])  # State transition matrix
-        self.H = np.array([1, 0]).reshape(1, 2)  # Measurement matrix
-        self.R = np.array([[5]])  # Measurement noise covariance
-        self.Q = np.array([[1, 0], [0, 1]])  # Process noise covariance
-        self.B = np.array([[0], [0]])  # Control matrix (not used)
-
-    def predict(self):
-        # Prediction step
-        self.state = np.dot(self.F, self.state)
-        self.P = np.dot(np.dot(self.F, self.P), self.F.T) + self.Q
-
-    def update(self, z):
-        # Update step
-        y = z - np.dot(self.H, self.state)
-        S = np.dot(np.dot(self.H, self.P), self.H.T) + self.R
-        K = np.dot(np.dot(self.P, self.H.T), np.linalg.inv(S))
-        self.state = self.state + np.dot(K, y)
-        self.P = self.P - np.dot(np.dot(K, self.H), self.P)
-
-    def get_state(self):
-        return self.state[0]  # Return the position (smoothed distance)
-
 # Function to count reps for chest fly with Kalman filtering and hysteresis
 def count_chest_fly_reps(distance, rep_count, state, kalman_filter, min_threshold=100, max_threshold=250, tolerance=20, post_close_buffer=10):
     """Count reps with Kalman filtering and hysteresis logic."""
@@ -251,7 +121,7 @@ def _update_log_widget(message):
     log_text_widget.see(tk.END)
 
 # Initialize position estimator
-position_estimator = PositionEstimator()
+position_estimator = PositionEstimator(mp_pose)
 
 # Initialize variables for chest fly rep counting
 chest_fly_rep_count = 0
