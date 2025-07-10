@@ -26,3 +26,14 @@ class KalmanFilter:
 
     def get_state(self):
         return self.state[0]  # Return the position (smoothed distance)
+    
+
+if __name__ == "__main__":
+    # Example usage
+    kf = KalmanFilter()
+    measurements = [10, 12, 11, 13, 15, 14]  # Example distance measurements
+
+    for z in measurements:
+        kf.predict()
+        kf.update(np.array([[z]]))
+        print(f"Smoothed distance: {kf.get_state()}")
