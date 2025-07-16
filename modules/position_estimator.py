@@ -222,7 +222,7 @@ if __name__ == "__main__":
             # Extrae los puntos de referencia detectados
             landmarks = results.pose_landmarks.landmark
             
-            opcion = 3
+            opcion = 2
 
             if opcion == 1:
                 # Estima la distancia desde la cámara
